@@ -1,0 +1,107 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+# /var/log/maillog
+#
+# Dec 11 06:48:39 mx44 postfix/smtpd[23438]: connect from A83OCQDfcDPF76d6A.gqml8pehjFsc6.ru[21.65.20.130]
+# Dec 11 06:48:39 mx44 postfix/smtpd[23438]: FB548E3F: client=A83OCQDfcDPF76d6A.gqml8pehjFsc6.ru[21.65.20.130]
+# Dec 11 06:48:39 mx44 postfix/cleanup[28362]: FB548E3F: message-id=<>
+# Dec 11 06:48:39 mx44 opendkim[26941]: FB548E3F: DKIM-Signature field added (s=mail, d=mail.ru)
+# Dec 11 06:48:39 mx44 postfix/qmgr[11]: FB548E3F: from=<eMRnaTiPHTjPMLkU7HWZ@mail.ru>, size=501, nrcpt=1 (queue active)
+# Dec 11 06:48:39 mx44 postfix/smtpd[23438]: disconnect from A83OCQDfcDPF76d6A.gqml8pehjFsc6.ru[21.65.20.130]
+# Dec 11 06:48:39 mx44 postfix/smtp[21368]: Untrusted TLS connection established to mxs.mail.ru[218.233.189.160]:25: TLSv1.2 with cipher ECDHE-RSA-AES256-GCM-SHA384 (256/256 bits)
+# Dec 11 06:48:39 mx44 postfix/smtp[21368]: FB548E3F: to=<kkM5wjNd5U@mail.ru>, relay=mxs.mail.ru[218.233.189.160]:25, delay=0.76, delays=0.39/0/0.04/0.03, dsn=2.0.0, status=sent (250 OK id=Lh5VRV-OoWKvg-Hi)
+# Dec 11 06:48:39 mx44 postfix/qmgr[11]: FB548E3F: removed
+
+
+import glob
+import os
+import pickle
+import re
+import sys
+
+from collections import Counter
+
+try:
+    import geoip2.database
+    import geoip2.errors
+    GEOLITE2_COUNTRY_DB = "GeoLite2-Country.mmdb"
+except ImportError:
+    sys.exit("Please, install geoip2 package!")
+
+
+geolite2_paths = glob.glob("GeoLite2*/%s" % GEOLITE2_COUNTRY_DB)
+if not geolite2_paths:
+    sys.exit("Please, download GeoLite2-Country.mmdb database!")
+
+GEOLITE2_COUNTRY_PATH = geolite2_paths[-1]
+IP_ADDRESS_RE = re.compile(r"client=.*\[(.*)\]$")
+EMAIL_ADDRESS_RE = re.compile(r"to=<(.*)>")
+
+
+def cache(name):
+    def wrapper(func):
+        def wrap(*args, **kwargs):
+            if os.path.exists(name):
+                with open(name) as f:
+                    return pickle.load(f)
+            else:
+                data = func(*args, **kwargs)
+                with open(name, "w") as f:
+                    pickle.dump(data, f)
+                return data
+        return wrap
+    return wrapper
+
+
+@cache("ips_and_emails")
+def filter_maillog(path):
+    ips = []
+    emails = []
+
+    with open(path) as f:
+        for line in f:
+            ip_address = IP_ADDRESS_RE.search(line)
+            if ip_address:
+                ips.append(ip_address.group(1))
+                continue
+            email = EMAIL_ADDRESS_RE.search(line)
+            if email:
+                emails.append(email.group(1))
+                continue
+
+    # TODO: search 'to' email address by client connection
+    assert len(ips) == len(emails)
+    return zip(ips, emails)
+
+
+@cache("ips_and_emails_af")
+def filter_by_continent(data, code="AF"):
+    if not code:
+        return data
+    if not isinstance(code, basestring):
+        raise TypeError
+
+    filtered = []
+    with geoip2.database.Reader(GEOLITE2_COUNTRY_PATH) as reader:
+        for ip, email in data:
+            try:
+                response = reader.country(ip)
+            except geoip2.errors.AddressNotFoundError:
+                continue
+            else:
+                if response.continent.code == code.upper():
+                    filtered.append((ip, email))
+    return filtered
+
+
+def main():
+    ips_and_emails = filter_maillog("/var/log/maillog")
+    ips_and_emails_af = filter_by_continent(ips_and_emails)
+    top_emails = Counter(
+        email for _, email in ips_and_emails_af).most_common(21)
+    print("".join(email[0] for email, _ in top_emails))
+
+
+if __name__ == "__main__":
+    main()
